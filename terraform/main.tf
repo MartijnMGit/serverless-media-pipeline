@@ -47,13 +47,14 @@ module "lambda_analyze_image" {
 
   policy_statements = [
     {
-      sid       = "ReadMediaBucket"
-      actions   = ["s3:GetObject"]
+      # DeleteObject so flagged uploads can be removed on the spot.
+      sid       = "ReadAndDeleteMediaBucket"
+      actions   = ["s3:GetObject", "s3:DeleteObject"]
       resources = ["${module.storage.media_bucket_arn}/*"]
     },
     {
-      sid       = "DetectLabels"
-      actions   = ["rekognition:DetectLabels"]
+      sid       = "DetectAndModerateLabels"
+      actions   = ["rekognition:DetectLabels", "rekognition:DetectModerationLabels"]
       resources = ["*"]
     }
   ]

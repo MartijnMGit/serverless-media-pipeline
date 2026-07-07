@@ -33,7 +33,7 @@ A typical upload, step by step:
 
 1. The browser asks the API for an upload URL. A Lambda returns a presigned S3 PUT URL, valid for five minutes and restricted to image content types.
 2. The browser uploads the file straight to S3. The file never passes through Lambda or API Gateway, which sidesteps the API Gateway 10 MB payload limit and keeps the Lambda bill at zero for the heavy part.
-3. S3 publishes the new object to EventBridge, and a rule starts a Step Functions execution. Three Lambdas run in sequence: thumbnail generation with Pillow, label detection with Rekognition, and a metadata write to DynamoDB. An SNS email confirms success or failure.
+3. S3 publishes the new object to EventBridge, and a rule starts a Step Functions execution. Three Lambdas run in sequence: thumbnail generation with Pillow, content moderation plus label detection with Rekognition, and a metadata write to DynamoDB. An SNS email confirms success or failure.
 4. The gallery page polls the API until the result appears, usually within three seconds.
 
 The frontend, the API and the images are all served by one CloudFront distribution under one domain. Because the browser never makes a cross-origin request, there is no CORS configuration anywhere in the project.
@@ -90,6 +90,8 @@ Keeping it cheap is enforced, not hoped for:
 Every Lambda has its own IAM role with only the permissions its job needs. The presign function can write to the `uploads/` prefix and nothing else, the metadata writer can only put items in the one table, and the public gallery endpoints can only read. A bug in one function does not become access to everything else.
 
 The buckets are not public. CloudFront reaches them through Origin Access Control, and each bucket policy only accepts requests signed by this specific distribution. Upload URLs are presigned, expire after five minutes, accept only image content types, and filenames are stripped to safe characters before they become object keys, so a hostile filename cannot smuggle path segments into the bucket.
+
+Uploads are content-moderated before anything goes public. Rekognition's `DetectModerationLabels` runs ahead of label detection, and a flagged upload is deleted on the spot, original and thumbnail both, before any database record exists. The gallery can only ever show content that passed the check.
 
 CI/CD holds no credentials. GitHub Actions authenticates with short-lived OIDC tokens, and the role's trust policy names exactly two allowed subjects, pushes to main and pull requests on this repository, so a fork cannot assume the deploy role. The API throttling and the budget circuit breaker described under Cost double as abuse protection.
 
