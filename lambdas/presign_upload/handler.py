@@ -4,8 +4,20 @@ import re
 import uuid
 
 import boto3
+from botocore.config import Config
 
-s3 = boto3.client("s3")
+# boto3's default S3 endpoint resolution generates presigned URLs against
+# the global s3.amazonaws.com host regardless of region_name, and S3
+# 307-redirects that away for any bucket outside us-east-1 - a redirect a
+# presigned PUT can't safely follow. Forcing the regional endpoint directly
+# avoids the redirect entirely.
+_REGION = os.environ["AWS_REGION"]
+s3 = boto3.client(
+    "s3",
+    region_name=_REGION,
+    endpoint_url=f"https://s3.{_REGION}.amazonaws.com",
+    config=Config(s3={"addressing_style": "virtual"}),
+)
 
 MEDIA_BUCKET = os.environ["MEDIA_BUCKET"]
 UPLOAD_URL_TTL_SECONDS = 300

@@ -13,6 +13,7 @@ BUCKET = "test-media-bucket"
 def handler_module(monkeypatch):
     monkeypatch.setenv("MEDIA_BUCKET", BUCKET)
     monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-west-3")
+    monkeypatch.setenv("AWS_REGION", "eu-west-3")
     with mock_aws():
         s3 = boto3.client("s3", region_name="eu-west-3")
         s3.create_bucket(Bucket=BUCKET, CreateBucketConfiguration={"LocationConstraint": "eu-west-3"})
@@ -32,6 +33,9 @@ def test_returns_presigned_url_and_key(handler_module):
     assert payload["key"].endswith("photo.jpg")
     assert "upload_url" in payload
     assert "image_id" in payload
+    # Must be the regional endpoint - the global s3.amazonaws.com endpoint
+    # gets 307-redirected for buckets outside us-east-1, breaking presigned PUTs.
+    assert "eu-west-3" in payload["upload_url"]
 
 
 def test_sanitizes_unsafe_filename(handler_module):

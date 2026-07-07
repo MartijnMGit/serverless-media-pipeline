@@ -39,6 +39,23 @@ resource "aws_cloudfront_origin_access_control" "s3" {
   signing_protocol                  = "sigv4"
 }
 
+# The media bucket's object keys (uploads/..., processed/...) have no
+# "media/" prefix, but the public URLs are served at /media/* so they share
+# a distribution with the frontend and API without colliding. Strip that
+# prefix before CloudFront forwards the request to the S3 origin.
+resource "aws_cloudfront_function" "strip_media_prefix" {
+  name    = "${var.project}-strip-media-prefix"
+  runtime = "cloudfront-js-2.0"
+  publish = true
+  code    = <<-EOT
+    function handler(event) {
+      var request = event.request;
+      request.uri = request.uri.replace(/^\/media/, '');
+      return request;
+    }
+  EOT
+}
+
 resource "aws_cloudfront_distribution" "this" {
   enabled             = true
   default_root_object = "index.html"
@@ -82,6 +99,11 @@ resource "aws_cloudfront_distribution" "this" {
     allowed_methods        = ["GET", "HEAD"]
     cached_methods         = ["GET", "HEAD"]
     cache_policy_id        = "658327ea-f89d-4fab-a63d-7e88639e58f6" # AWS managed: CachingOptimized
+
+    function_association {
+      event_type   = "viewer-request"
+      function_arn = aws_cloudfront_function.strip_media_prefix.arn
+    }
   }
 
   ordered_cache_behavior {
@@ -90,8 +112,12 @@ resource "aws_cloudfront_distribution" "this" {
     viewer_protocol_policy   = "redirect-to-https"
     allowed_methods          = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
     cached_methods           = ["GET", "HEAD"]
-    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS managed: CachingDisabled
-    origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3" # AWS managed: AllViewer
+    cache_policy_id = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS managed: CachingDisabled
+    # AllViewerExceptHostHeader, not AllViewer: forwarding the viewer's
+    # original Host header (media.martinscloud.be) straight to API Gateway
+    # gets every request rejected with 403 - API Gateway requires the Host
+    # header to match its own execute-api domain.
+    origin_request_policy_id = "b689b0a8-53d0-40ab-baf2-68738e2966ac"
   }
 
   restrictions {
