@@ -1,6 +1,6 @@
 # Serverless Media Analysis Pipeline
 
-Upload a photo and get back a thumbnail plus a set of AI-generated labels. Built on AWS Lambda, Step Functions and API Gateway, deployed with Terraform, shipped through GitHub Actions.
+Upload a photo and get back a thumbnail plus a set of AI-generated labels. Built on AWS Lambda, Step Functions, API Gateway, DynamoDB and Rekognition, deployed with Terraform, shipped through GitHub Actions.
 
 **Live demo:** https://media.martinscloud.be
 
@@ -85,6 +85,14 @@ Keeping it cheap is enforced, not hoped for:
 - An AWS Budgets Action works as a circuit breaker. Budget alerts only send email; they never stop anything. This action automatically attaches a deny-all IAM policy to all six Lambda roles when spend crosses the $5 budget, which halts the pipeline until I detach the policy manually. That is as close to a hard spending cap as AWS offers.
 - A lifecycle rule deletes uploads and thumbnails after 30 days.
 
+## Security
+
+Every Lambda has its own IAM role with only the permissions its job needs. The presign function can write to the `uploads/` prefix and nothing else, the metadata writer can only put items in the one table, and the public gallery endpoints can only read. A bug in one function does not become access to everything else.
+
+The buckets are not public. CloudFront reaches them through Origin Access Control, and each bucket policy only accepts requests signed by this specific distribution. Upload URLs are presigned, expire after five minutes, accept only image content types, and filenames are stripped to safe characters before they become object keys, so a hostile filename cannot smuggle path segments into the bucket.
+
+CI/CD holds no credentials. GitHub Actions authenticates with short-lived OIDC tokens, and the role's trust policy names exactly two allowed subjects, pushes to main and pull requests on this repository, so a fork cannot assume the deploy role. The API throttling and the budget circuit breaker described under Cost double as abuse protection.
+
 ## Testing
 
 18 pytest unit tests, one file per Lambda handler, with AWS mocked through moto. Each handler is loaded as an isolated module so the six identically-named `handler.py` files do not collide. The float/Decimal bug above was caught by these tests before the code ever reached AWS. CI runs the suite plus `terraform fmt`, `validate` and `plan` on every pull request; merges to main apply the infrastructure, sync the frontend to S3 and invalidate the CloudFront cache.
@@ -134,6 +142,14 @@ terraform apply -var="notification_email=you@example.com"
 The live demo page after a couple of uploads:
 
 ![Live demo](docs/screenshots/live-demo.png)
+
+A Step Functions execution, with the caught-error branches visible next to the green path:
+
+![Step Functions execution graph](docs/screenshots/step-functions-execution.png)
+
+The CloudWatch dashboard tracking invocations, errors and duration per function:
+
+![CloudWatch dashboard](docs/screenshots/cloudwatch-dashboard.png)
 
 The CI/CD history, including the two failed runs that became the "things that went wrong" section above:
 
