@@ -1,20 +1,16 @@
 # Serverless Media Analysis Pipeline
 
-**Event-driven image processing on AWS Lambda, Step Functions, and API Gateway — deployed with Terraform and GitHub Actions.**
+Upload a photo and get back a thumbnail plus a set of AI-generated labels. Built on AWS Lambda, Step Functions and API Gateway, deployed with Terraform, shipped through GitHub Actions.
 
-🌐 **Live:** https://media.martinscloud.be
+**Live demo:** https://media.martinscloud.be
 
----
+## Why this project exists
 
-## 📋 Project Overview
+My first portfolio project, [martinscloud.be](https://www.martinscloud.be), runs on a single EC2 instance with Nginx, Flask and SQLite. It taught me the VM side of AWS: VPC design, security groups, TLS, systemd, backups, and a full cross-region migration. Three things were missing from it: serverless architecture, Terraform, and CI/CD.
 
-Upload a photo and a fully serverless pipeline takes over: a Lambda generates a thumbnail, Amazon Rekognition labels the contents, the result lands in DynamoDB, and an SNS notification confirms it's done — all visible live on the demo page below.
+This project covers exactly that gap, and it is deliberately the opposite style of application. Nothing runs when nobody uses it, all infrastructure lives in version-controlled Terraform, and a push to main deploys to production without me opening the AWS console.
 
-This is the companion piece to my [MartinsCloud portfolio site](https://www.martinscloud.be), which is deliberately VM-based (EC2, RDS→SQLite, CloudFormation). That project proved I can run a server. This one proves the other half: **event-driven serverless architecture, Terraform (a second IaC tool beyond CloudFormation), and a real CI/CD pipeline** — the three things I was explicitly still building toward.
-
----
-
-## 🏗 Architecture
+## How it works
 
 ```
 Browser (frontend on S3 + CloudFront, media.martinscloud.be)
@@ -33,79 +29,85 @@ S3 (uploads/ prefix) ──EventBridge──▶ Step Functions (Standard workflo
                                         4. SNS topic → email ("upload processed")
 ```
 
-Everything — frontend, API, and media files — is served from one CloudFront distribution under one domain, so there's no cross-origin request in play at all.
+A typical upload, step by step:
 
----
+1. The browser asks the API for an upload URL. A Lambda returns a presigned S3 PUT URL, valid for five minutes and restricted to image content types.
+2. The browser uploads the file straight to S3. The file never passes through Lambda or API Gateway, which sidesteps the API Gateway 10 MB payload limit and keeps the Lambda bill at zero for the heavy part.
+3. S3 publishes the new object to EventBridge, and a rule starts a Step Functions execution. Three Lambdas run in sequence: thumbnail generation with Pillow, label detection with Rekognition, and a metadata write to DynamoDB. An SNS email confirms success or failure.
+4. The gallery page polls the API until the result appears, usually within three seconds.
 
-## 🔑 Key design decisions
+The frontend, the API and the images are all served by one CloudFront distribution under one domain. Because the browser never makes a cross-origin request, there is no CORS configuration anywhere in the project.
 
-- **Presigned S3 upload, not a Lambda-proxied one.** The browser uploads straight to S3 via a presigned PUT URL instead of routing the file through API Gateway/Lambda. Avoids API Gateway's 10 MB payload limit and keeps the upload Lambda's cold start (and cost) near zero.
-- **Step Functions, not a Lambda calling Lambdas.** Chaining three Lambdas as Step Functions states instead of direct invocation gives visible execution history, per-step retries, and a clean failure path (an SNS alert + `Fail` state) — a real orchestration pattern, not just glue code.
-- **S3 → EventBridge → Step Functions, no shim Lambda.** S3 publishes object-created events straight onto the default EventBridge bus; a rule filters for the `uploads/` prefix and starts the state machine directly. One less thing to maintain.
-- **ACM + CloudFront here, Let's Encrypt on the EC2 project.** ACM only attaches to CloudFront/ALB, so it's the right tool now that CloudFront is in the picture — the opposite constraint from the EC2 project, where ACM wasn't an option without a load balancer.
-- **Terraform, not CloudFormation.** The EC2 project already proved CloudFormation; this one deliberately uses a second IaC tool, with its own state backend (S3 + DynamoDB lock table) bootstrapped once and reused on every run.
-- **GitHub OIDC, not access keys.** GitHub Actions assumes an IAM role via short-lived OIDC tokens (`terraform/modules/github_oidc`) — no long-lived AWS keys ever sit in GitHub secrets.
-- **DynamoDB on-demand.** Same choice as the visitor counter on the EC2 project, but here for the opposite reason: that one has predictable low traffic so a fixed 1 RCU/WCU makes sense; this one has *unpredictable* demo traffic, so on-demand avoids either throttling a burst or paying for idle capacity.
+## Design decisions
 
----
+**Step Functions rather than one big Lambda.** The three processing stages could easily live in a single function. Splitting them means each stage retries independently (a Rekognition hiccup does not redo the thumbnail work), the execution history in the console shows exactly which stage failed with what input, and each function gets an IAM role with only the permissions its own job needs. The public gallery endpoint physically cannot write to S3 or call Rekognition.
 
-## 💰 Cost (near-$0 by design)
+**S3 to EventBridge to Step Functions, with no glue Lambda in between.** S3 can publish object-created events directly onto the EventBridge bus, and an EventBridge rule can start a state machine execution by itself. A shim Lambda here would be one more thing to maintain for no benefit.
 
-| Component | Why it's ~free |
+**Terraform, not CloudFormation.** The EC2 project already uses CloudFormation, so this one deliberately uses the other major IaC tool. State lives in an S3 backend with a DynamoDB lock table, bootstrapped once by a separate config in `terraform/bootstrap`.
+
+**GitHub OIDC instead of access keys.** The deploy workflow assumes an IAM role using short-lived OIDC tokens. No AWS credentials are stored in GitHub secrets. The trust policy accepts exactly two subjects, pushes to main and pull requests, so a fork cannot assume the role.
+
+**ACM here, Let's Encrypt on the EC2 project.** ACM certificates only attach to CloudFront and load balancers, which is why the EC2 site uses Certbot instead. With CloudFront in front, ACM becomes the right tool. Having hit both constraints in two projects is a useful thing to be able to explain.
+
+## Things that went wrong
+
+Every one of these happened during the real deployment and is visible in the commit history.
+
+**Rekognition does not exist in eu-west-3.** The whole stack lives in Paris, and the first live pipeline run died with a connection error to `rekognition.eu-west-3.amazonaws.com`. Rekognition simply is not offered there, and its S3Object input mode only accepts buckets in the same region as the endpoint anyway. The fix reads the thumbnail bytes in Paris and sends them inline to a Rekognition client pinned to eu-west-1.
+
+**Presigned URLs pointed at the wrong S3 endpoint.** boto3 signs presigned URLs against the global `s3.amazonaws.com` host by default. For buckets outside us-east-1, S3 answers with a 307 redirect, which a presigned PUT cannot follow. Uploads failed until the client was pinned to the regional endpoint with virtual-hosted addressing.
+
+**Every image returned 403 through CloudFront.** Public image URLs live under `/media/*` so they can share the distribution with the frontend, but the object keys in the bucket have no `media/` prefix. CloudFront forwarded the full path and S3 saw requests for keys that do not exist. A four-line CloudFront Function now strips the prefix before the request reaches the origin.
+
+**DynamoDB refuses Python floats.** Rekognition returns confidence scores as floats, and the DynamoDB resource API only accepts Decimal. This one never reached AWS: the pytest suite with moto caught it locally, which is the best advertisement for writing those tests I can offer.
+
+**The deploy role could not read its own front door.** The CI role's IAM policy was scoped to resources named after the project, but Terraform also manages the OIDC provider itself, whose ARN carries GitHub's name instead. The first CI run failed refreshing state on the one resource that authenticates the role doing the refreshing. It got a read-only permission for exactly that ARN.
+
+**Gmail kept unsubscribing me from my own alerts.** Every SNS email contains a one-click unsubscribe link, and mail scanners follow links. Each notification instantly killed its own subscription. Confirming the subscription with `AuthenticateOnUnsubscribe=true` means unsubscribing now requires AWS credentials, which a link scanner does not have.
+
+## Cost
+
+| Component | Monthly cost at portfolio traffic |
 |---|---|
-| Lambda | Permanent free tier (1M requests/month) |
-| DynamoDB | On-demand, permanent free tier covers this volume |
-| API Gateway (HTTP API) | Cheaper API type; fractions of a cent per demo request |
-| Step Functions (Standard) | $0.025 per 1,000 state transitions — cents even after hundreds of test uploads |
-| Rekognition `DetectLabels` | ~$1/1,000 images outside the 12-month free tier — trivial at portfolio scale |
-| S3 + SNS (email) | Fractions of a cent per test run |
-| CloudFront | Free tier covers 1 TB/month for 12 months, pennies after |
+| Lambda | $0 (permanent free tier, 1M requests) |
+| DynamoDB | $0 (on-demand, permanent free tier) |
+| API Gateway (HTTP API) | fractions of a cent |
+| Step Functions | $0.025 per 1,000 state transitions |
+| Rekognition | ~$1 per 1,000 images after the first-year free tier |
+| S3, SNS, CloudWatch | fractions of a cent |
+| CloudFront | $0 (always-free tier covers 1 TB/month) |
 
-**Guardrails, not just hope:**
-- **API Gateway throttling** (10 rps / 20 burst) — a scripted loop against the upload endpoint can't trigger unbounded Rekognition/Step Functions spend; verified live with a 60-request burst getting 429s.
-- **Upload size guard** — presigned PUT URLs can't enforce a size limit, so `process_image` rejects anything over 10 MB using the size from the S3 event, before reading a single byte.
-- **Budget circuit breaker** — the part most projects skip: AWS Budget *alerts* only email, they never stop spend. An AWS Budgets **Action** here automatically attaches a deny-all IAM policy to all six Lambda execution roles at 100% of the $5 budget, physically halting the pipeline. Recovery is a deliberate manual detach in the IAM console after investigating.
-- AWS Budget alert emails at 80% actual / 100% forecasted (tag-filtered to just this project's resources).
-- S3 lifecycle rule expires `uploads/`/`processed/` objects after 30 days.
-- DynamoDB on-demand — no idle capacity charge if the demo goes quiet.
+Keeping it cheap is enforced, not hoped for:
 
----
+- API Gateway throttles at 10 requests per second (burst 20), so a scripted loop against the upload endpoint cannot generate unbounded Rekognition and Step Functions spend. Verified by firing a 60-request burst and watching the 429s come back.
+- Presigned PUT URLs cannot enforce a file size, so `process_image` checks the object size from the S3 event and rejects anything over 10 MB before reading a single byte.
+- An AWS Budgets Action works as a circuit breaker. Budget alerts only send email; they never stop anything. This action automatically attaches a deny-all IAM policy to all six Lambda roles when spend crosses the $5 budget, which halts the pipeline until I detach the policy manually. That is as close to a hard spending cap as AWS offers.
+- A lifecycle rule deletes uploads and thumbnails after 30 days.
 
-## 🛠 Technologies
+## Testing
 
-- **Compute:** AWS Lambda (Python 3.12), Pillow layer built from PyPI manylinux wheels (no Docker)
-- **Orchestration:** AWS Step Functions (Standard workflow), EventBridge
-- **API:** API Gateway (HTTP API)
-- **Storage:** S3 (uploads, processed thumbnails, static frontend), DynamoDB (on-demand)
-- **AI:** Amazon Rekognition (`DetectLabels`)
-- **Delivery:** CloudFront, ACM, Route53
-- **Messaging:** SNS
-- **IaC:** Terraform (S3 + DynamoDB remote state backend)
-- **CI/CD:** GitHub Actions, OIDC federation to AWS (no stored access keys)
-- **Testing:** pytest + moto (mocked AWS), one isolated unit test per Lambda handler
-- **Observability:** CloudWatch dashboard (Lambda invocations/errors/duration, Step Functions success/failure), AWS Budgets
+18 pytest unit tests, one file per Lambda handler, with AWS mocked through moto. Each handler is loaded as an isolated module so the six identically-named `handler.py` files do not collide. The float/Decimal bug above was caught by these tests before the code ever reached AWS. CI runs the suite plus `terraform fmt`, `validate` and `plan` on every pull request; merges to main apply the infrastructure, sync the frontend to S3 and invalidate the CloudFront cache.
 
----
-
-## 📂 Repo layout
+## Repo layout
 
 ```
 serverless-media-pipeline/
-├── terraform/              # root config + modules (storage, database, lambda,
-│                            #   step_functions, api_gateway, sns, cloudfront,
-│                            #   budget, monitoring, github_oidc)
+├── terraform/               # root config + modules (storage, database, lambda,
+│   │                        #   step_functions, api_gateway, sns, cloudfront,
+│   │                        #   budget, monitoring, github_oidc)
 │   └── bootstrap/           # one-time: Terraform state S3 bucket + lock table
-├── lambdas/                 # one directory per function, each with its own handler.py
-├── step_functions/           # ASL state machine definition (Terraform templatefile)
-├── frontend/                 # plain HTML/CSS/JS upload form + gallery
-├── tests/                    # pytest + moto unit tests, one file per Lambda
+├── lambdas/                 # one directory per function
+├── step_functions/          # state machine definition (Terraform templatefile)
+├── frontend/                # plain HTML/CSS/JS upload form + gallery
+├── tests/                   # pytest + moto, one file per Lambda
 ├── scripts/build_pillow_layer.sh
-└── .github/workflows/        # ci.yml (PR checks), deploy.yml (main branch)
+└── .github/workflows/       # ci.yml (PR checks), deploy.yml (main branch)
 ```
 
----
+One packaging note: Pillow contains compiled C code, so the Lambda layer is built by asking pip for the Linux x86_64 wheel explicitly (`--platform manylinux2014_x86_64`). The same script works on my Windows machine and on the GitHub Actions runner, with no Docker involved.
 
-## 💻 Local development
+## Running it yourself
 
 ```bash
 git clone https://github.com/MartijnMGit/serverless-media-pipeline.git
@@ -117,27 +119,22 @@ pip install -r tests/requirements-test.txt
 pytest tests/ -v
 ```
 
-To plan/apply infrastructure locally:
+Deploying the infrastructure:
 
 ```bash
-bash scripts/build_pillow_layer.sh   # must run before any plan/apply
+bash scripts/build_pillow_layer.sh   # must run before any plan or apply
 cd terraform
 terraform init
-terraform plan   -var="notification_email=you@example.com"
-terraform apply  -var="notification_email=you@example.com"
+terraform plan  -var="notification_email=you@example.com"
+terraform apply -var="notification_email=you@example.com"
 ```
 
----
+## Screenshots
 
-## ✨ Highlights & challenges
+The live demo page after a couple of uploads:
 
-- Caught a real bug via the test suite before it ever reached production: DynamoDB's resource API rejects native Python floats, so Rekognition's confidence scores needed converting to `Decimal` before being written — pytest + moto surfaced this locally in seconds instead of failing silently in a live Step Functions execution.
-- Routed the frontend, API, and media files through a single CloudFront distribution and domain, which removes CORS from the picture entirely rather than configuring around it.
-- Replaced a Terraform `null_resource` + `local-exec` build step for the Pillow layer with a plain shell script once I realized `archive_file` zips its source directory during `plan`, not just `apply` — the local-exec approach would only produce the directory on `apply`, breaking a clean `plan` on a fresh checkout.
-- Scoped the GitHub Actions OIDC trust policy to exactly two subjects (`ref:refs/heads/main` and `pull_request`) instead of the whole repo wildcard, so forks and arbitrary branches can't assume the deploy role.
+![Live demo](docs/screenshots/live-demo.png)
 
----
+The CI/CD history, including the two failed runs that became the "things that went wrong" section above:
 
-## 📸 Screenshots
-
-_Added after first live deploy._
+![GitHub Actions runs](docs/screenshots/github-actions.png)
