@@ -74,6 +74,17 @@ data "aws_iam_policy_document" "deploy" {
     resources = ["arn:aws:iam::*:role/${var.project}-*", "arn:aws:iam::*:policy/${var.project}-*"]
   }
 
+  # Self-referential quirk: this same Terraform state manages the OIDC
+  # provider that authenticates the deploy role, so the role needs to be
+  # able to read it (Terraform refreshes every resource in state on apply).
+  # Its ARN is provider-named, not project-named, so the statement above
+  # doesn't cover it. Read-only is enough - CI never changes the provider.
+  statement {
+    sid       = "ReadOwnOidcProvider"
+    actions   = ["iam:GetOpenIDConnectProvider"]
+    resources = ["arn:aws:iam::*:oidc-provider/token.actions.githubusercontent.com"]
+  }
+
   statement {
     sid       = "AcmForCloudFrontCert"
     actions   = ["acm:*"]
