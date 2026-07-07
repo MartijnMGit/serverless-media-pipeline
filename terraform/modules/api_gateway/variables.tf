@@ -15,3 +15,15 @@ variable "cors_allowed_origins" {
   type    = list(string)
   default = ["*"]
 }
+
+variable "throttling_rate_limit" {
+  description = "Steady-state requests per second across all routes"
+  type        = number
+  default     = 10
+}
+
+variable "throttling_burst_limit" {
+  description = "Maximum concurrent request burst"
+  type        = number
+  default     = 20
+}

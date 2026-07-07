@@ -42,6 +42,26 @@ def test_generates_thumbnail_and_returns_metadata(s3_client):
     assert max(thumb_image.size) <= 400
 
 
+def test_rejects_oversized_upload_before_reading_it(s3_client):
+    module = load_lambda_handler("process_image")
+
+    with pytest.raises(ValueError, match="over the"):
+        module.lambda_handler(
+            {"bucket": BUCKET, "key": "uploads/x-huge.jpg", "size": module.MAX_UPLOAD_BYTES + 1},
+            None,
+        )
+
+
+def test_accepts_upload_at_size_limit(s3_client):
+    key = "uploads/22222222-3333-4444-5555-666666666666-ok.jpg"
+    _upload_test_image(s3_client, key)
+
+    module = load_lambda_handler("process_image")
+    result = module.lambda_handler({"bucket": BUCKET, "key": key, "size": module.MAX_UPLOAD_BYTES}, None)
+
+    assert result["thumbnail_key"].startswith("processed/")
+
+
 def test_passes_through_input_fields(s3_client):
     key = "uploads/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee-pic.png"
     _upload_test_image(s3_client, key)

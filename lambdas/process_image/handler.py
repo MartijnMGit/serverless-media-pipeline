@@ -9,10 +9,20 @@ s3 = boto3.client("s3")
 THUMBNAIL_MAX_SIZE = (400, 400)
 UUID_LENGTH = 36
 
+# Presigned PUT URLs can't enforce an upload size, so this is the first
+# place oversized files can be stopped. Refusing here (before any S3 read
+# or Pillow work) keeps a hostile multi-GB upload from costing anything
+# beyond its brief S3 storage, which the lifecycle rule cleans up.
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
 
 def lambda_handler(event, context):
     bucket = event["bucket"]
     key = event["key"]
+
+    size = event.get("size")
+    if size is not None and int(size) > MAX_UPLOAD_BYTES:
+        raise ValueError(f"Upload {key} is {size} bytes, over the {MAX_UPLOAD_BYTES} byte limit")
 
     obj = s3.get_object(Bucket=bucket, Key=key)
     image = Image.open(io.BytesIO(obj["Body"].read())).convert("RGB")

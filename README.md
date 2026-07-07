@@ -62,7 +62,10 @@ Everything — frontend, API, and media files — is served from one CloudFront 
 | CloudFront | Free tier covers 1 TB/month for 12 months, pennies after |
 
 **Guardrails, not just hope:**
-- AWS Budget alert at $5/month (tag-filtered to just this project's resources, so it doesn't get lost in the noise of other AWS spend).
+- **API Gateway throttling** (10 rps / 20 burst) — a scripted loop against the upload endpoint can't trigger unbounded Rekognition/Step Functions spend; verified live with a 60-request burst getting 429s.
+- **Upload size guard** — presigned PUT URLs can't enforce a size limit, so `process_image` rejects anything over 10 MB using the size from the S3 event, before reading a single byte.
+- **Budget circuit breaker** — the part most projects skip: AWS Budget *alerts* only email, they never stop spend. An AWS Budgets **Action** here automatically attaches a deny-all IAM policy to all six Lambda execution roles at 100% of the $5 budget, physically halting the pipeline. Recovery is a deliberate manual detach in the IAM console after investigating.
+- AWS Budget alert emails at 80% actual / 100% forecasted (tag-filtered to just this project's resources).
 - S3 lifecycle rule expires `uploads/`/`processed/` objects after 30 days.
 - DynamoDB on-demand — no idle capacity charge if the demo goes quiet.
 

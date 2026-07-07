@@ -134,12 +134,14 @@ resource "aws_cloudwatch_event_target" "start_pipeline" {
       bucket = "$.detail.bucket.name"
       key    = "$.detail.object.key"
       time   = "$.time"
+      size   = "$.detail.object.size"
     }
     input_template = <<EOF
 {
   "bucket": <bucket>,
   "key": <key>,
-  "uploaded_at": <time>
+  "uploaded_at": <time>,
+  "size": <size>
 }
 EOF
   }

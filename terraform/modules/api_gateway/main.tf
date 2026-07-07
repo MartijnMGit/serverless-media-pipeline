@@ -15,6 +15,14 @@ resource "aws_apigatewayv2_stage" "default" {
   name        = "$default"
   auto_deploy = true
 
+  # Cost guardrail: without a throttle, a scripted loop against the upload
+  # endpoint could trigger unbounded Rekognition/Step Functions spend. These
+  # limits are far above legitimate portfolio traffic but bound the worst case.
+  default_route_settings {
+    throttling_rate_limit  = var.throttling_rate_limit
+    throttling_burst_limit = var.throttling_burst_limit
+  }
+
   access_log_settings {
     destination_arn = aws_cloudwatch_log_group.access_logs.arn
     format = jsonencode({

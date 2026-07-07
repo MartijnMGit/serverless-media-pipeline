@@ -201,6 +201,15 @@ module "budget" {
   project            = var.project
   limit_usd          = var.budget_limit_usd
   notification_email = var.notification_email
+
+  breaker_role_names = [
+    module.lambda_process_image.role_name,
+    module.lambda_analyze_image.role_name,
+    module.lambda_save_metadata.role_name,
+    module.lambda_presign_upload.role_name,
+    module.lambda_get_images.role_name,
+    module.lambda_get_image.role_name,
+  ]
 }
 
 module "github_oidc" {
